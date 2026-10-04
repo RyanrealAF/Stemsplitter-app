@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stemsplitter Client</title>
+<style>
+:root{--bg:#0d0d10;--card:#17171c;--line:#2a2a33;--fg:#ececf1;--dim:#8b8b99;--acc:#ff4d4d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:18px;max-width:760px;margin:auto}
+h1{font-size:22px;margin:6px 0 2px}
+p.sub{color:var(--dim);margin:0 0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px}
+#drop{border:2px dashed var(--line);border-radius:12px;padding:28px 12px;text-align:center;color:var(--dim);cursor:pointer;transition:.15s}
+#drop.over,#drop:hover{border-color:var(--acc);color:var(--fg)}
+button{background:var(--acc);color:#fff;border:0;border-radius:10px;padding:11px 18px;font:600 15px system-ui;cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button:disabled{opacity:.4;cursor:default}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:12px}
+label{display:block;font-size:12px;color:var(--dim);margin:10px 0 4px}
+input[type=text],input[type=password]{width:100%;background:#0d0d10;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:9px}
+#status{font-weight:600}
+#bar{height:4px;background:var(--line);border-radius:4px;overflow:hidden;margin-top:10px;display:none}
+#bar i{display:block;height:100%;width:30%;background:var(--acc);animation:slide 1.2s infinite ease-in-out}
+@keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
+.file{border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:10px}
+.file b{display:block;word-break:break-all;margin-bottom:6px}
+audio{width:100%}
+a{color:#7db7ff}
+pre{background:#0d0d10;border:1px solid var(--line);border-radius:8px;padding:10px;overflow:auto;max-height:340px;font-size:12px;white-space:pre-wrap;word-break:break-word}
+details summary{cursor:pointer;color:var(--dim)}
+.err{color:#ff8080}
+</style></head>
+<body>
+<h1>Stemsplitter Client</h1>
+<p class="sub">Upload a track, send it to your Hugging Face Space, get stems and analysis back.</p>
+
+<div class="card">
+  <div id="drop">Tap or drop an audio file here<input id="file" type="file" accept="audio/*,.mp3,.wav,.flac,.m4a,.ogg" hidden></div>
+  <div id="picked" class="sub" style="margin-top:10px"></div>
+  <div class="row">
+    <button id="go" disabled>Process</button>
+    <button id="cancel" class="ghost" disabled>Cancel</button>
+    <span id="status"></span>
+  </div>
+  <div id="bar"><i></i></div>
+</div>
+
+<div class="card">
+  <details>
+    <summary>Settings</summary>
+    <label>Space URL</label>
+    <input id="base" type="text" value="https://ryanrealaf-stemsplitter.hf.space">
+    <label>API name</label>
+    <input id="api" type="text" value="process_sync">
+    <label>Hugging Face token (optional, stored only in this browser)</label>
+    <input id="token" type="password" placeholder="hf_...">
+  </details>
+</div>
+
+<div id="results" class="card" style="display:none">
+  <div class="row" style="margin:0 0 6px"><b>Results</b>
+    <button id="dl" class="ghost">Download results.json</button></div>
+  <div id="out"></div>
+  <details style="margin-top:12px"><summary>Raw response</summary><pre id="raw"></pre></details>
+</div>
+
+<div class="card"><details><summary>Event log</summary><pre id="log"></pre></details></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let file = null, ctrl = null, lastResult = null, timer = null;
+
+// ---------- UI wiring ----------
+$('drop').onclick = () => $('file').click();
+$('file').onchange = e => pick(e.target.files[0]);
+['dragover','dragenter'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.add('over'); }));
+['dragleave','drop'].forEach(ev => $('drop').addEventListener(ev, e => { e.preventDefault(); $('drop').classList.remove('over'); }));
+$('drop').addEventListener('drop', e => pick(e.dataTransfer.files[0]));
+$('token').value = localStorage.getItem('hf_token') || '';
+$('token').onchange = () => localStorage.setItem('hf_token', $('token').value.trim());
+
+function pick(f) {
+  if (!f) return;
+  file = f;
+  $('picked').textContent = `${f.name} · ${(f.size / 1048576).toFixed(1)} MB`;
+  $('go').disabled = false;
+}
+const log = m => { $('log').textContent += `[${new Date().toLocaleTimeString()}] ${m}\n`; };
+function setStatus(m, err) { $('status').textContent = m; $('status').className = err ? 'err' : ''; }
+function busy(b) {
+  $('go').disabled = b || !file; $('cancel').disabled = !b;
+  $('bar').style.display = b ? 'block' : 'none';
+}
+
+// ---------- Gradio REST helpers ----------
+const baseUrl = () => $('base').value.trim().replace(/\/+$/, '');
+const authHeaders = () => { const t = $('token').value.trim(); return t ? { Authorization: 'Bearer ' + t } : {}; };
+
+async function uploadFile(f, signal) {
+  for (const path of ['/gradio_api/upload', '/upload']) {
+    const fd = new FormData(); fd.append('files', f, f.name);
+    const r = await fetch(baseUrl() + path, { method: 'POST', body: fd, headers: authHeaders(), signal });
+    if (r.status === 404) continue;
+    if (!r.ok) throw new Error(`Upload failed (${r.status}): ${await r.text()}`);
+    const j = await r.json();
+    return { path: j[0], orig_name: f.name, size: f.size, meta: { _type: 'gradio.FileData' } };
+  }
+  throw new Error('Upload endpoint not found on this Space');
+}
+
+// POST /gradio_api/call/<api>  ->  event_id, then stream GET /gradio_api/call/<api>/<event_id>
+async function callApi(api, data, signal) {
+  const start = await fetch(`${baseUrl()}/gradio_api/call/${api}`, {
+    method: 'POST', signal,
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ data })
+  });
+  if (!start.ok) throw new Error(`Call failed (${start.status}): ${await start.text()}`);
+  const { event_id } = await start.json();
+  log('event_id ' + event_id);
+
+  const res = await fetch(`${baseUrl()}/gradio_api/call/${api}/${event_id}`, { headers: authHeaders(), signal });
+  if (!res.ok || !res.body) throw new Error(`Stream failed (${res.status})`);
+
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, i); buf = buf.slice(i + 2);
+      let ev = 'message', d = [];
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event:')) ev = line.slice(6).trim();
+        else if (line.startsWith('data:')) d.push(line.slice(5).trimStart());
+      }
+      const payload = d.join('\n');
+      log(`${ev}: ${payload.slice(0, 160)}`);
+      if (ev === 'complete') return JSON.parse(payload);
+      if (ev === 'error') throw new Error(payload && payload !== 'null' ? payload : 'The Space returned an error (check its logs)');
+    }
+  }
+  throw new Error('Stream ended without a result');
+}
+
+// ---------- Run ----------
+$('go').onclick = async () => {
+  if (!file) return;
+  ctrl = new AbortController();
+  $('results').style.display = 'none'; $('log').textContent = '';
+  busy(true);
+  const t0 = Date.now();
+  timer = setInterval(() => setStatus(`Working… ${Math.floor((Date.now() - t0) / 1000)}s`), 500);
+  try {
+    setStatus('Uploading…');
+    const fd = await uploadFile(file, ctrl.signal);
+    log('uploaded ' + fd.path);
+    clearInterval(timer);
+    timer = setInterval(() => setStatus(`Processing… ${Math.floor((Date.now() - t0) / 1000)}s`), 500);
+    const out = await callApi($('api').value.trim() || 'process_sync', [fd], ctrl.signal);
+    clearInterval(timer);
+    setStatus(`Done in ${Math.round((Date.now() - t0) / 1000)}s`);
+    show(out);
+  } catch (e) {
+    clearInterval(timer);
+    setStatus(e.name === 'AbortError' ? 'Cancelled' : e.message, e.name !== 'AbortError');
+    log('ERROR ' + e.message);
+  } finally { busy(false); }
+};
+$('cancel').onclick = () => ctrl && ctrl.abort();
+
+// ---------- Render whatever comes back ----------
+const AUDIO = /\.(mp3|wav|flac|ogg|m4a|aac)(\?|$)/i;
+const fileUrl = f => f.url || `${baseUrl()}/gradio_api/file=${f.path}`;
+const isFileData = v => v && typeof v === 'object' && (v.url || v.path) && (!v.meta || v.meta._type === 'gradio.FileData');
+
+function show(outputs) {
+  lastResult = outputs;
+  $('raw').textContent = JSON.stringify(outputs, null, 2);
+  const out = $('out'); out.innerHTML = '';
+  const walk = (v, label) => {
+    if (v == null) return;
+    if (Array.isArray(v)) { v.forEach((x, i) => walk(x, label ? `${label}[${i}]` : `output ${i}`)); return; }
+    if (isFileData(v)) { out.appendChild(fileCard(v, label)); return; }
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (/^https?:\/\//.test(s)) { out.appendChild(fileCard({ url: s, orig_name: label }, label)); return; }
+      if (/^[\[{]/.test(s)) { try { v = JSON.parse(s); } catch { } }
+    }
+    const box = document.createElement('div'); box.className = 'file';
+    box.innerHTML = `<b></b><pre></pre>`;
+    box.querySelector('b').textContent = label || 'result';
+    box.querySelector('pre').textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+    out.appendChild(box);
+  };
+  walk(outputs, '');
+  $('results').style.display = 'block';
+}
+
+function fileCard(f, label) {
+  const url = fileUrl(f), name = f.orig_name || (f.path || url).split('/').pop() || label;
+  const d = document.createElement('div'); d.className = 'file';
+  const b = document.createElement('b'); b.textContent = name; d.appendChild(b);
+  if (AUDIO.test(name) || AUDIO.test(url)) {
+    const a = document.createElement('audio'); a.controls = true; a.preload = 'none'; a.src = url; d.appendChild(a);
+  }
+  const l = document.createElement('a'); l.href = url; l.target = '_blank'; l.rel = 'noopener'; l.download = name;
+  l.textContent = 'Download'; l.style.display = 'inline-block'; l.style.marginTop = '8px'; d.appendChild(l);
+  return d;
+}
+
+$('dl').onclick = () => {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(lastResult, null, 2)], { type: 'application/json' }));
+  a.download = 'results.json'; a.click();
+};
+</script>
+</body></html>
