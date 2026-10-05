@@ -1,0 +1,69 @@
+<REAPER_PROJECT 0.1 "7.0" 0
+  TEMPO 83.330 4 4
+  <TRACK
+    NAME "drums"
+    <ITEM
+      POSITION 0
+      LENGTH 253.085
+      NAME "drums"
+      <SOURCE MP3
+        FILE "drums.mp3"
+      >
+    >
+  >
+  <TRACK
+    NAME "bass"
+    <ITEM
+      POSITION 0
+      LENGTH 253.085
+      NAME "bass"
+      <SOURCE MP3
+        FILE "bass.mp3"
+      >
+    >
+  >
+  <TRACK
+    NAME "other"
+    <ITEM
+      POSITION 0
+      LENGTH 253.085
+      NAME "other"
+      <SOURCE MP3
+        FILE "other.mp3"
+      >
+    >
+  >
+  <TRACK
+    NAME "vocals"
+    <ITEM
+      POSITION 0
+      LENGTH 253.085
+      NAME "vocals"
+      <SOURCE MP3
+        FILE "vocals.mp3"
+      >
+    >
+  >
+  <TRACK
+    NAME "guitar"
+    <ITEM
+      POSITION 0
+      LENGTH 253.085
+      NAME "guitar"
+      <SOURCE MP3
+        FILE "guitar.mp3"
+      >
+    >
+  >
+  <TRACK
+    NAME "piano"
+    <ITEM
+      POSITION 0
+      LENGTH 253.085
+      NAME "piano"
+      <SOURCE MP3
+        FILE "piano.mp3"
+      >
+    >
+  >
+>
