@@ -68,6 +68,18 @@ details summary{cursor:pointer;color:var(--dim)}
   <audio id="perfAudio" controls preload="metadata" style="width:100%;margin-top:12px"></audio>
 </div>
 
+<div id="cadence" class="card" style="display:none">
+  <div class="row" style="margin:0 0 6px"><b>Beat &times; Cadence</b><span class="sub" id="cadenceMeta"></span></div>
+  <div class="sub" style="margin-bottom:8px">How the rap cadence sits against the beat grid. Green dots = vocal onsets. Red = kick, blue = snare, gray = beats.</div>
+  <label>Timeline (beats, drums, vocal onsets)</label>
+  <canvas id="cvTimeline" width="700" height="120" style="width:100%;height:auto;background:#0d0d10;border:1px solid var(--line);border-radius:8px"></canvas>
+  <label style="margin-top:12px">Vocal energy with beat markers</label>
+  <canvas id="cvEnergy" width="700" height="100" style="width:100%;height:auto;background:#0d0d10;border:1px solid var(--line);border-radius:8px"></canvas>
+  <label style="margin-top:12px">Pocket histogram (vocal onset offset from nearest beat, ms)</label>
+  <canvas id="cvPocket" width="700" height="120" style="width:100%;height:auto;background:#0d0d10;border:1px solid var(--line);border-radius:8px"></canvas>
+  <div id="cadenceStats" class="sub" style="margin-top:8px"></div>
+</div>
+
 <div id="results" class="card" style="display:none">
   <div class="row" style="margin:0 0 6px"><b>Results</b>
     <button id="dl" class="ghost">Download results.json</button></div>
@@ -160,7 +172,7 @@ async function callApi(api, data, signal) {
 $('go').onclick = async () => {
   if (!file) return;
   ctrl = new AbortController();
-  $('results').style.display = 'none'; $('log').textContent = '';
+  $('results').style.display = 'none'; $('cadence').style.display = 'none'; $('log').textContent = '';
   busy(true);
   const t0 = Date.now();
   timer = setInterval(() => setStatus(`Working… ${Math.floor((Date.now() - t0) / 1000)}s`), 500);
@@ -173,7 +185,9 @@ $('go').onclick = async () => {
     const out = await callApi($('api').value.trim() || 'process_sync', [fd], ctrl.signal);
     clearInterval(timer);
     setStatus(`Done in ${Math.round((Date.now() - t0) / 1000)}s`);
-    show(out);\n    renderPerformance(out);
+    show(out);
+    renderPerformance(out);
+    try{renderCadence(out);}catch(e){log('cadence viz: '+e.message);}
   } catch (e) {
     clearInterval(timer);
     setStatus(e.name === 'AbortError' ? 'Cancelled' : e.message, e.name !== 'AbortError');
@@ -231,7 +245,127 @@ function runPerformance(){
  audio.ontimeupdate=clock;audio.onseeked=clock;audio.onplay=clock;clock();
  $('perfPlay').onclick=()=>audio.paused?audio.play():audio.pause();
 }
-\n// ---------- Render whatever comes back ----------
+
+// ---------- Beat x Cadence visualization ----------
+function extractAnalysis(outputs){
+ let found=null;
+ function walk(v){
+  if(found)return;
+  if(!v||typeof v!=='object')return;
+  if(Array.isArray(v)){v.forEach(walk);return;}
+  if(Array.isArray(v.beats_ms)&&v.beats_ms.length){found=v;return;}
+  Object.values(v).forEach(walk);
+ }
+ walk(outputs);
+ return found;
+}
+function detectVocalOnsets(envDb, hopMs, thresholdDb=-40, minGapMs=120){
+ const onsets=[];
+ let lastOnset=-1e9;
+ for(let i=1;i<envDb.length;i++){
+  const t=i*hopMs;
+  const prev=envDb[i-1], cur=envDb[i];
+  if(prev<thresholdDb&&cur>=thresholdDb&&(cur-prev)>3){
+   if(t-lastOnset>=minGapMs){onsets.push(Math.round(t));lastOnset=t;}
+  }
+ }
+ return onsets;
+}
+function nearestBeatOffset(onsetMs, beatsMs){
+ let best=null;
+ for(const b of beatsMs){
+  const off=onsetMs-b;
+  if(best===null||Math.abs(off)<Math.abs(best))best=off;
+  if(b>onsetMs+500)break;
+ }
+ return best;
+}
+function renderCadence(outputs){
+ const a=extractAnalysis(outputs);
+ if(!a||!Array.isArray(a.beats_ms)||!a.beats_ms.length)return;
+ const beats=a.beats_ms.map(Number).filter(Number.isFinite);
+ const kicks=Array.isArray(a.kick_onsets_ms_approx)?a.kick_onsets_ms_approx.map(Number).filter(Number.isFinite):[];
+ const snares=Array.isArray(a.snare_onsets_ms_approx)?a.snare_onsets_ms_approx.map(Number).filter(Number.isFinite):[];
+ const envDb=Array.isArray(a.vocal_envelope_db)?a.vocal_envelope_db:[];
+ const hopMs=Number(a.vocal_envelope_hop_ms)||50;
+ const durationMs=Number(a.duration_sec)*1000||Math.max(...beats)+2000;
+ const bpm=Number(a.bpm_measured_from_beats??a.bpm_detected);
+ const onsets=detectVocalOnsets(envDb, hopMs);
+ const pockets=onsets.map(t=>({t, off:nearestBeatOffset(t, beats)})).filter(p=>p.off!==null&&Math.abs(p.off)<300);
+ const avgPocket=pockets.length?pockets.reduce((s,p)=>s+p.off,0)/pockets.length:0;
+ const ahead=pockets.filter(p=>p.off<-15).length;
+ const behind=pockets.filter(p=>p.off>15).length;
+ const onBeat=pockets.length-ahead-behind;
+ $('cadenceMeta').textContent=[bpm?bpm.toFixed(1)+' BPM':null,beats.length+' beats',onsets.length+' vocal onsets'].filter(Boolean).join(' \u00b7 ');
+ $('cadenceStats').innerHTML=
+  'Avg pocket: <b>'+(avgPocket>=0?'+':'')+avgPocket.toFixed(1)+'ms</b> ('+(avgPocket<-15?'ahead of':avgPocket>15?'behind':'on')+' the beat) \u00b7 '+
+  'Ahead: '+ahead+' ('+(ahead/pockets.length*100||0).toFixed(0)+'%) \u00b7 On: '+onBeat+' \u00b7 Behind: '+behind+' ('+(behind/pockets.length*100||0).toFixed(0)+'%)'+
+  (a.offbeat_ratio!=null?' \u00b7 Offbeat ratio: '+Number(a.offbeat_ratio).toFixed(3):'');
+ drawTimeline($('cvTimeline'), {beats, kicks, snares, onsets, durationMs});
+ drawEnergy($('cvEnergy'), {envDb, hopMs, beats, durationMs});
+ drawPocket($('cvPocket'), pockets);
+ $('cadence').style.display='block';
+}
+function drawTimeline(cv, o){
+ const ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+ ctx.clearRect(0,0,W,H);
+ const x=t=>t/o.durationMs*W;
+ ctx.strokeStyle='#3a3a44';ctx.lineWidth=1;
+ o.beats.forEach(b=>{ctx.beginPath();ctx.moveTo(x(b),H-30);ctx.lineTo(x(b),H-10);ctx.stroke();});
+ ctx.fillStyle='#ff4d4d';
+ o.kicks.forEach(k=>{ctx.fillRect(x(k)-1,10,2,18);});
+ ctx.fillStyle='#5aa9ff';
+ o.snares.forEach(s=>{ctx.fillRect(x(s)-1,32,2,18);});
+ ctx.fillStyle='#4dff88';
+ o.onsets.forEach(t=>{ctx.beginPath();ctx.arc(x(t),H-45,3,0,7);ctx.fill();});
+ ctx.fillStyle='#8b8b99';ctx.font='10px system-ui';
+ ctx.fillText('kick',4,22);ctx.fillStyle='#ff4d4d';ctx.fillRect(34,14,14,3);
+ ctx.fillStyle='#8b8b99';ctx.fillText('snare',52,22);ctx.fillStyle='#5aa9ff';ctx.fillRect(88,14,14,3);
+ ctx.fillStyle='#8b8b99';ctx.fillText('vocal',106,22);ctx.fillStyle='#4dff88';ctx.beginPath();ctx.arc(140,18,3,0,7);ctx.fill();
+ ctx.fillStyle='#8b8b99';ctx.fillText('beats',154,22);
+}
+function drawEnergy(cv, o){
+ const ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+ ctx.clearRect(0,0,W,H);
+ if(!o.envDb.length)return;
+ const x=t=>t/o.durationMs*W;
+ ctx.strokeStyle='#2a2a33';ctx.lineWidth=1;
+ o.beats.forEach(b=>{ctx.beginPath();ctx.moveTo(x(b),0);ctx.lineTo(x(b),H);ctx.stroke();});
+ ctx.strokeStyle='#4dff88';ctx.lineWidth=1.5;ctx.beginPath();
+ o.envDb.forEach((db,i)=>{
+  const px=x(i*o.hopMs);
+  const norm=Math.max(0,Math.min(1,(db+95)/75));
+  const py=H-4-norm*(H-8);
+  i?ctx.lineTo(px,py):ctx.moveTo(px,py);
+ });
+ ctx.stroke();
+ ctx.fillStyle='#8b8b99';ctx.font='10px system-ui';
+ ctx.fillText('vocal energy (dB) with beat grid',4,12);
+}
+function drawPocket(cv, pockets){
+ const ctx=cv.getContext('2d'),W=cv.width,H=cv.height;
+ ctx.clearRect(0,0,W,H);
+ if(!pockets.length){ctx.fillStyle='#8b8b99';ctx.fillText('no pocket data',10,H/2);return;}
+ const bins=new Array(20).fill(0);
+ pockets.forEach(p=>{
+  const b=Math.max(0,Math.min(19,Math.floor((p.off+150)/15)));
+  bins[b]++;
+ });
+ const max=Math.max(...bins,1);
+ const bw=W/20;
+ bins.forEach((c,i)=>{
+  const h=c/max*(H-24);
+  const centerMs=(i*15)-150+7.5;
+  ctx.fillStyle=Math.abs(centerMs)<=15?'#4dff88':Math.abs(centerMs)<=60?'#ffcc44':'#ff4d4d';
+  ctx.fillRect(i*bw+1,H-16-h,bw-2,h);
+ });
+ ctx.strokeStyle='#fff';ctx.lineWidth=1;
+ ctx.beginPath();ctx.moveTo(W/2,4);ctx.lineTo(W/2,H-16);ctx.stroke();
+ ctx.fillStyle='#8b8b99';ctx.font='10px system-ui';
+ ctx.fillText('-150ms (ahead)',4,H-4);ctx.fillText('0',W/2-4,H-4);ctx.fillText('+150ms (behind)',W-90,H-4);
+}
+
+// ---------- Render whatever comes back ----------
 const AUDIO = /\.(mp3|wav|flac|ogg|m4a|aac)(\?|$)/i;
 const fileUrl = f => f.url || `${baseUrl()}/gradio_api/file=${f.path}`;
 const isFileData = v => v && typeof v === 'object' && (v.url || v.path) && (!v.meta || v.meta._type === 'gradio.FileData');
